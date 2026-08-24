@@ -9,9 +9,6 @@
  *   $env:COMPANIES_HOUSE_API_KEY="your_key"
  *   $env:HUNTER_API_KEY="your_key"
  *   npm start
- *
- * This file intentionally contains the complete API so it can be copied
- * without the original monorepo folders.
  */
 
 const express = require("express");
@@ -28,6 +25,146 @@ const HUNTER_BASE = "https://api.hunter.io/v2";
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 app.use(express.static(path.join(__dirname, "public")));
+
+// =============================================================================
+// User-Agent Rotation for Web Scraping
+// =============================================================================
+
+const USER_AGENTS = [
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.2; rv:121.0) Gecko/20100101 Firefox/121.0",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15"
+];
+
+function getRandomUserAgent() {
+  return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+}
+
+// =============================================================================
+// Web Discovery & Scraper Functions
+// =============================================================================
+
+function generateDomainCandidates(companyName) {
+  const stopWords = /\b(ltd|limited|plc|llp|group|uk|the|and|&|solutions|services|holdings|technologies|technology|global|international|consulting|consultancy|systems|digital|labs|ventures|studio|studios|media|creative|co)\b/gi;
+  const cleaned = companyName.toLowerCase().replace(stopWords, "").replace(/[^a-z0-9]/g, "").trim();
+  const hyphenated = companyName.toLowerCase().replace(stopWords, "").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").trim();
+  if (!cleaned) return [];
+  const candidates = [];
+  for (const host of [...new Set([cleaned, hyphenated].filter(Boolean))]) {
+    for (const tld of [".co.uk", ".com", ".io", ".org.uk"]) {
+      candidates.push(`https://www.${host}${tld}`);
+      candidates.push(`https://${host}${tld}`);
+    }
+  }
+  return [...new Set(candidates)];
+}
+
+async function probeUrl(url) {
+  try {
+    const res = await fetch(url, { 
+      method: "HEAD", 
+      signal: AbortSignal.timeout(4000), 
+      redirect: "follow",
+      headers: { "User-Agent": getRandomUserAgent() }
+    });
+    return res.status < 400 || res.status === 405;
+  } catch {
+    return false;
+  }
+}
+
+async function tryFindWebsiteByDomain(companyName) {
+  const candidates = generateDomainCandidates(companyName);
+  if (!candidates.length) return null;
+  const BATCH_SIZE = 4;
+  for (let i = 0; i < candidates.length; i += BATCH_SIZE) {
+    const batch = candidates.slice(i, i + BATCH_SIZE);
+    const results = await Promise.all(batch.map(async (url) => ({ url, ok: await probeUrl(url) })));
+    const hit = results.find((r) => r.ok);
+    if (hit) return hit.url;
+  }
+  return null;
+}
+
+const EMAIL_RE = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
+const JUNK_EMAIL = /example|test|youremail|your@|no-reply|noreply|support@support|info@info/i;
+const FILE_EXT = /\.(png|jpe?g|gif|webp|svg|ico|bmp|pdf|docx?|xlsx?|zip|mp[34]|mov|css|js|ts|json|xml)$/i;
+const TEL_HREF_RE = /href=["']tel:([^"']+)["']/gi;
+const PHONE_RE = /(?:\+44|0044|\b0)[\s.\-()]?\d{2,5}[\s.\-()]?\d{3,4}[\s.\-()]?\d{3,4}/g;
+
+function isValidEmail(email) {
+  if (JUNK_EMAIL.test(email)) return false;
+  if (FILE_EXT.test(email)) return false;
+  const tld = email.split(".").pop() ?? "";
+  return /^[a-zA-Z]{2,6}$/.test(tld);
+}
+
+function normalisePhone(raw) {
+  const digits = raw.replace(/[\s.\-()]/g, "");
+  if (digits.startsWith("+44")) return digits;
+  if (digits.startsWith("0044")) return "+44" + digits.slice(4);
+  if (digits.startsWith("0")) return "+44" + digits.slice(1);
+  return digits;
+}
+
+function isValidUkPhone(phone) {
+  return /^\+44\d{10}$/.test(phone);
+}
+
+async function fetchHtml(url, timeoutMs = 6000) {
+  const res = await fetch(url, {
+    signal: AbortSignal.timeout(timeoutMs),
+    headers: { "User-Agent": getRandomUserAgent() },
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.text();
+}
+
+async function extractContactFromWebsite(baseUrl) {
+  let email = null;
+  let phone = null;
+
+  const tryExtract = (html) => {
+    if (!email) {
+      const mailtoMatch = html.match(/href=["']mailto:([^"'?]+)/i);
+      const hrefEmail = mailtoMatch?.[1]?.trim();
+      if (hrefEmail && isValidEmail(hrefEmail)) {
+        email = hrefEmail;
+      } else {
+        const emails = (html.match(EMAIL_RE) ?? []).filter(isValidEmail);
+        if (emails.length) email = emails[0];
+      }
+    }
+    if (!phone) {
+      let found = false;
+      let m;
+      TEL_HREF_RE.lastIndex = 0;
+      while ((m = TEL_HREF_RE.exec(html)) !== null) {
+        const n = normalisePhone(m[1]);
+        if (isValidUkPhone(n)) { phone = n; found = true; break; }
+      }
+      if (!found) {
+        for (const raw of html.match(PHONE_RE) ?? []) {
+          const n = normalisePhone(raw);
+          if (isValidUkPhone(n)) { phone = n; break; }
+        }
+      }
+    }
+  };
+
+  for (const url of [baseUrl, `${baseUrl}/contact`, `${baseUrl}/contact-us`, `${baseUrl}/about`]) {
+    if (email && phone) break;
+    try { tryExtract(await fetchHtml(url)); } catch { /* try next */ }
+  }
+
+  return { email, phone };
+}
+
+// =============================================================================
+// Helper Functions
+// =============================================================================
 
 function address(address) {
   address = address || {};
@@ -95,8 +232,9 @@ async function companiesHouse(path) {
   return response.json();
 }
 
-function companyResult(data, appointment) {
+function companyResult(data, appointment, scraped = {}) {
   const sicCodes = data?.sic_codes || [];
+  const compWebsite = scraped.website || data?.website || null;
   return {
     companyNumber: appointment?.appointed_to?.company_number || data?.company_number || "",
     companyName: appointment?.appointed_to?.company_name || data?.company_name || "Unknown",
@@ -108,9 +246,10 @@ function companyResult(data, appointment) {
     resignedOn: appointment?.resigned_on || null,
     registeredAddress: address(data?.registered_office_address || appointment?.address),
     incorporatedOn: data?.date_of_creation || null,
-    website: data?.website || null,
-    email: null,
-    phone: null,
+    website: compWebsite,
+    websiteIsReal: !!scraped.website,
+    email: scraped.email || null,
+    phone: scraped.phone || null,
     isActive: !appointment?.resigned_on &&
       (appointment?.appointed_to?.company_status || data?.company_status || "active") !== "dissolved",
   };
@@ -163,9 +302,30 @@ async function getCompanies(officerIds) {
     const results = await Promise.all(batch.map(async (appointment) => {
       const number = appointment.appointed_to?.company_number;
       const data = number ? await companiesHouse(`/company/${number}`).catch(() => null) : null;
-      return companyResult(data, appointment);
+      
+      const compName = appointment?.appointed_to?.company_name || data?.company_name || "";
+      const isActive = !appointment?.resigned_on && (appointment?.appointed_to?.company_status || data?.company_status || "active") !== "dissolved";
+      
+      let scraped = {};
+      if (isActive && compName) {
+        try {
+          const foundWebsite = await tryFindWebsiteByDomain(compName);
+          if (foundWebsite) {
+            const contacts = await extractContactFromWebsite(foundWebsite);
+            scraped = { website: foundWebsite, email: contacts.email, phone: contacts.phone };
+          }
+        } catch (e) {
+          // Gracefully ignore web scraping errors
+        }
+      }
+      return companyResult(data, appointment, scraped);
     }));
     companies.push(...results);
+
+    // Rate-limit safeguard between batches
+    if (i + 5 < appointments.length) {
+      await new Promise((r) => setTimeout(r, 150));
+    }
   }
   return companies;
 }
@@ -181,11 +341,11 @@ function contactLeads(officer, companies) {
   for (const company of companies) {
     if (company.email && !emails.has(company.email)) {
       emails.add(company.email);
-      emailLeads.push({ email: company.email, source: "Companies House", companyName: company.companyName, confidence: "high" });
+      emailLeads.push({ email: company.email, source: "Website Scraping", companyName: company.companyName, confidence: "high" });
     }
     if (company.phone && !phones.has(company.phone)) {
       phones.add(company.phone);
-      phoneLeads.push({ phone: company.phone, source: "Companies House", companyName: company.companyName, confidence: "high" });
+      phoneLeads.push({ phone: company.phone, source: "Website Scraping", companyName: company.companyName, confidence: "high" });
     }
     const key = `${company.registeredAddress.postalCode}|${company.registeredAddress.addressLine1}`;
     if (key !== "|" && !addresses.has(key)) {
@@ -196,8 +356,11 @@ function contactLeads(officer, companies) {
 
   const { firstName, lastName } = nameParts(officer.name);
   const searches = [];
-  const salesNav = (keywords) => `https://www.linkedin.com/sales/search/people?query=${encodeURIComponent(`(spellCorrectionEnabled:true,keywords:${keywords})`)}`;
+  
+  // FIXED: Clean keywords & geoIncluded format for Sales Navigator
+  const salesNav = (keywords) => `https://www.linkedin.com/sales/search/people?keywords=${encodeURIComponent(keywords)}&geoIncluded=101165590`;
   const shortName = `${firstName} ${lastName}`.trim();
+  
   searches.push({
     searchUrl: salesNav(shortName),
     searchLabel: shortName,
@@ -205,9 +368,10 @@ function contactLeads(officer, companies) {
     confidence: "low",
     derivedFrom: "Director name",
   });
+  
   for (const company of companies.filter((item) => item.isActive).slice(0, 3)) {
     searches.push({
-      searchUrl: salesNav(`${shortName} "${company.companyName}"`),
+      searchUrl: salesNav(`${shortName} ${company.companyName}`),
       searchLabel: `${shortName} at ${company.companyName}`,
       reasoning: `Searches for the director at ${company.companyName}.`,
       confidence: "high",
@@ -271,6 +435,10 @@ function asyncRoute(handler) {
     if (!res.headersSent) res.status(500).json({ error: "Request failed" });
   });
 }
+
+// =============================================================================
+// API Routes
+// =============================================================================
 
 app.get("/api/healthz", (_req, res) => res.json({ status: "ok" }));
 
