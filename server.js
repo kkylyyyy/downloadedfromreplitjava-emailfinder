@@ -16,6 +16,7 @@
 
 const express = require("express");
 const cors = require("cors");
+const path = require("path");
 
 const app = express();
 const PORT = Number(process.env.PORT || 8080);
@@ -26,6 +27,7 @@ const HUNTER_BASE = "https://api.hunter.io/v2";
 
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
+app.use(express.static(path.join(__dirname, "public")));
 
 function address(address) {
   address = address || {};
@@ -332,6 +334,10 @@ app.post("/api/directors/:officerId/hunter-emails", asyncRoute(async (req, res) 
   ))).filter(Boolean);
   res.json({ emailLeads });
 }));
+
+app.get("*", (_req, res) => {
+  res.sendFile(path.join(__dirname, "public", "index.html"));
+});
 
 app.listen(PORT, () => {
   console.log(`Director Finder API running at http://localhost:${PORT}`);
