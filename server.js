@@ -237,7 +237,6 @@ function companyResult(data, appointment, scraped = {}) {
   const compWebsite = scraped.website || data?.website || null;
   const compNumber = appointment?.appointed_to?.company_number || data?.company_number || "";
   
-  // Direct CH Company URL
   const chCompanyUrl = compNumber ? `https://find-and-update.company-information.service.gov.uk/company/${compNumber}` : null;
 
   return {
@@ -345,13 +344,26 @@ function contactLeads(officer, companies, officerId) {
   const addresses = new Set();
 
   for (const company of companies) {
+    // UPDATED: Now includes company.website directly in the lead object
     if (company.email && !emails.has(company.email)) {
       emails.add(company.email);
-      emailLeads.push({ email: company.email, source: "Website Scraping", companyName: company.companyName, confidence: "high" });
+      emailLeads.push({ 
+        email: company.email, 
+        source: "Website Scraping", 
+        companyName: company.companyName, 
+        website: company.website, 
+        confidence: "high" 
+      });
     }
     if (company.phone && !phones.has(company.phone)) {
       phones.add(company.phone);
-      phoneLeads.push({ phone: company.phone, source: "Website Scraping", companyName: company.companyName, confidence: "high" });
+      phoneLeads.push({ 
+        phone: company.phone, 
+        source: "Website Scraping", 
+        companyName: company.companyName, 
+        website: company.website, 
+        confidence: "high" 
+      });
     }
     const key = `${company.registeredAddress.postalCode}|${company.registeredAddress.addressLine1}`;
     if (key !== "|" && !addresses.has(key)) {
@@ -387,7 +399,6 @@ function contactLeads(officer, companies, officerId) {
     });
   }
 
-  // Direct CH Officers Appointments Link
   const chAppointmentsUrl = `https://find-and-update.company-information.service.gov.uk/officers/${encodeURIComponent(officerId)}/appointments`;
 
   return {
@@ -414,10 +425,13 @@ async function hunterEmail(directorName, website, companyName) {
   const data = await response.json();
   const score = data.data?.score || 0;
   if (!data.data?.email || score < 50) return null;
+  
+  // UPDATED: Now includes website directly in Hunter response payload
   return {
     email: data.data.email,
     source: "Hunter.io Email Finder",
     companyName,
+    website,
     confidence: score >= 80 ? "high" : "medium",
   };
 }
