@@ -235,8 +235,13 @@ async function companiesHouse(path) {
 function companyResult(data, appointment, scraped = {}) {
   const sicCodes = data?.sic_codes || [];
   const compWebsite = scraped.website || data?.website || null;
+  const compNumber = appointment?.appointed_to?.company_number || data?.company_number || "";
+  
+  // Direct CH Company URL
+  const chCompanyUrl = compNumber ? `https://find-and-update.company-information.service.gov.uk/company/${compNumber}` : null;
+
   return {
-    companyNumber: appointment?.appointed_to?.company_number || data?.company_number || "",
+    companyNumber: compNumber,
     companyName: appointment?.appointed_to?.company_name || data?.company_name || "Unknown",
     companyStatus: appointment?.appointed_to?.company_status || data?.company_status || null,
     companyType: data?.type || null,
@@ -250,6 +255,7 @@ function companyResult(data, appointment, scraped = {}) {
     websiteIsReal: !!scraped.website,
     email: scraped.email || null,
     phone: scraped.phone || null,
+    chCompanyUrl,
     isActive: !appointment?.resigned_on &&
       (appointment?.appointed_to?.company_status || data?.company_status || "active") !== "dissolved",
   };
@@ -315,14 +321,14 @@ async function getCompanies(officerIds) {
             scraped = { website: foundWebsite, email: contacts.email, phone: contacts.phone };
           }
         } catch (e) {
-          // Gracefully ignore web scraping errors
+          // Ignore scraping errors gracefully
         }
       }
       return companyResult(data, appointment, scraped);
     }));
     companies.push(...results);
 
-    // Rate-limit safeguard between batches
+    // Rate limit safeguard between batches
     if (i + 5 < appointments.length) {
       await new Promise((r) => setTimeout(r, 150));
     }
@@ -330,7 +336,7 @@ async function getCompanies(officerIds) {
   return companies;
 }
 
-function contactLeads(officer, companies) {
+function contactLeads(officer, companies, officerId) {
   const emailLeads = [];
   const phoneLeads = [];
   const addressLeads = [];
@@ -357,7 +363,6 @@ function contactLeads(officer, companies) {
   const { firstName, lastName } = nameParts(officer.name);
   const searches = [];
   
-  // FIXED: Clean keywords & geoIncluded format for Sales Navigator
   const salesNav = (keywords) => `https://www.linkedin.com/sales/search/people?keywords=${encodeURIComponent(keywords)}&geoIncluded=101165590`;
   const shortName = `${firstName} ${lastName}`.trim();
   
@@ -370,16 +375,23 @@ function contactLeads(officer, companies) {
   });
   
   for (const company of companies.filter((item) => item.isActive).slice(0, 3)) {
+    const pCode = company.registeredAddress?.postalCode || "";
+    const searchKeywords = pCode ? `${shortName} ${pCode}` : `${shortName} ${company.companyName}`;
+    
     searches.push({
-      searchUrl: salesNav(`${shortName} ${company.companyName}`),
-      searchLabel: `${shortName} at ${company.companyName}`,
-      reasoning: `Searches for the director at ${company.companyName}.`,
+      searchUrl: salesNav(searchKeywords),
+      searchLabel: `${shortName} (${pCode || company.companyName})`,
+      reasoning: `Searches director with postcode ${pCode || 'N/A'} for precise location matching.`,
       confidence: "high",
-      derivedFrom: `Active company: ${company.companyName}`,
+      derivedFrom: `Active company: ${company.companyName} | Postcode: ${pCode}`,
     });
   }
 
+  // Direct CH Officers Appointments Link
+  const chAppointmentsUrl = `https://find-and-update.company-information.service.gov.uk/officers/${encodeURIComponent(officerId)}/appointments`;
+
   return {
+    chAppointmentsUrl,
     linkedinSearchUrls: searches,
     emailLeads,
     phoneLeads,
@@ -425,7 +437,7 @@ async function profile(officerId) {
     occupation: officer.occupation,
     address: officer.address,
     companies,
-    contactLeads: contactLeads(officer, companies),
+    contactLeads: contactLeads(officer, companies, officerId),
   };
 }
 
