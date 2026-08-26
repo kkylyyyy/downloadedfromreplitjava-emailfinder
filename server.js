@@ -4,11 +4,6 @@
  * Setup:
  *   npm install
  *   COMPANIES_HOUSE_API_KEY=your_key HUNTER_API_KEY=your_key npm start
- *
- * Windows PowerShell:
- *   $env:COMPANIES_HOUSE_API_KEY="your_key"
- *   $env:HUNTER_API_KEY="your_key"
- *   npm start
  */
 
 const express = require("express");
@@ -26,10 +21,6 @@ app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
-// =============================================================================
-// User-Agent Rotation for Web Scraping
-// =============================================================================
-
 const USER_AGENTS = [
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -42,10 +33,6 @@ function getRandomUserAgent() {
   return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
 }
 
-// =============================================================================
-// Web Discovery & Scraper Functions
-// =============================================================================
-
 function generateDomainCandidates(companyName) {
   const stopWords = /\b(ltd|limited|plc|llp|group|uk|the|and|&|solutions|services|holdings|technologies|technology|global|international|consulting|consultancy|systems|digital|labs|ventures|studio|studios|media|creative|co)\b/gi;
   const cleaned = companyName.toLowerCase().replace(stopWords, "").replace(/[^a-z0-9]/g, "").trim();
@@ -54,8 +41,7 @@ function generateDomainCandidates(companyName) {
   const candidates = [];
   for (const host of [...new Set([cleaned, hyphenated].filter(Boolean))]) {
     for (const tld of [".co.uk", ".com", ".io", ".org.uk"]) {
-      candidates.push(`https://www.${host}${tld}`);
-      candidates.push(`https://${host}${tld}`);
+      candidates.push(`${host}${tld}`);
     }
   }
   return [...new Set(candidates)];
@@ -63,9 +49,9 @@ function generateDomainCandidates(companyName) {
 
 async function probeUrl(url) {
   try {
-    const res = await fetch(url, { 
-      method: "HEAD", 
-      signal: AbortSignal.timeout(4000), 
+    const res = await fetch(url, {
+      method: "HEAD",
+      signal: AbortSignal.timeout(4000),
       redirect: "follow",
       headers: { "User-Agent": getRandomUserAgent() }
     });
@@ -81,7 +67,7 @@ async function tryFindWebsiteByDomain(companyName) {
   const BATCH_SIZE = 4;
   for (let i = 0; i < candidates.length; i += BATCH_SIZE) {
     const batch = candidates.slice(i, i + BATCH_SIZE);
-    const results = await Promise.all(batch.map(async (url) => ({ url, ok: await probeUrl(url) })));
+    const results = await Promise.all(batch.map(async (url) => ({ url: `https://www.${url}`, ok: await probeUrl(`https://www.${url}`) })));
     const hit = results.find((r) => r.ok);
     if (hit) return hit.url;
   }
@@ -162,10 +148,6 @@ async function extractContactFromWebsite(baseUrl) {
   return { email, phone };
 }
 
-// =============================================================================
-// Helper Functions
-// =============================================================================
-
 function address(address) {
   address = address || {};
   return {
@@ -217,9 +199,7 @@ function samePerson(nameA, dobA, nameB, dobB) {
 }
 
 async function companiesHouse(path) {
-  if (!COMPANIES_HOUSE_API_KEY) {
-    throw new Error("COMPANIES_HOUSE_API_KEY is not configured");
-  }
+  if (!COMPANIES_HOUSE_API_KEY) throw new Error("COMPANIES_HOUSE_API_KEY is not configured");
   const response = await fetch(`${CH_BASE}${path}`, {
     headers: {
       Authorization: `Basic ${Buffer.from(`${COMPANIES_HOUSE_API_KEY}:`).toString("base64")}`,
@@ -236,8 +216,9 @@ function companyResult(data, appointment, scraped = {}) {
   const sicCodes = data?.sic_codes || [];
   const compWebsite = scraped.website || data?.website || null;
   const compNumber = appointment?.appointed_to?.company_number || data?.company_number || "";
-  
-  const chCompanyUrl = compNumber ? `https://find-and-update.company-information.service.gov.uk/company/${compNumber}` : null;
+  const chCompanyUrl = compNumber
+    ? `https://find-and-update.company-information.service.gov.uk/company/${compNumber}`
+    : null;
 
   return {
     companyNumber: compNumber,
@@ -292,14 +273,13 @@ async function getCompanies(officerIds) {
     const data = await companiesHouse(`/officers/${encodeURIComponent(id)}/appointments?items_per_page=50`);
     for (const item of data?.items || []) {
       const key = `${item.appointed_to?.company_number}|${item.officer_role}|${item.appointed_on || ""}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        appointments.push(item);
-      }
+      if (!seen.has(key)) { seen.add(key); appointments.push(item); }
     }
   }
-  appointments.sort((a, b) => Number(!b.resigned_on) - Number(!a.resigned_on) ||
-    String(b.appointed_on || "").localeCompare(String(a.appointed_on || "")));
+  appointments.sort((a, b) =>
+    Number(!b.resigned_on) - Number(!a.resigned_on) ||
+    String(b.appointed_on || "").localeCompare(String(a.appointed_on || ""))
+  );
 
   const companies = [];
   for (let i = 0; i < appointments.length; i += 5) {
@@ -307,10 +287,10 @@ async function getCompanies(officerIds) {
     const results = await Promise.all(batch.map(async (appointment) => {
       const number = appointment.appointed_to?.company_number;
       const data = number ? await companiesHouse(`/company/${number}`).catch(() => null) : null;
-      
       const compName = appointment?.appointed_to?.company_name || data?.company_name || "";
-      const isActive = !appointment?.resigned_on && (appointment?.appointed_to?.company_status || data?.company_status || "active") !== "dissolved";
-      
+      const isActive = !appointment?.resigned_on &&
+        (appointment?.appointed_to?.company_status || data?.company_status || "active") !== "dissolved";
+
       let scraped = {};
       if (isActive && compName) {
         try {
@@ -319,18 +299,12 @@ async function getCompanies(officerIds) {
             const contacts = await extractContactFromWebsite(foundWebsite);
             scraped = { website: foundWebsite, email: contacts.email, phone: contacts.phone };
           }
-        } catch (e) {
-          // Ignore scraping errors gracefully
-        }
+        } catch (e) { /* ignore scraping errors */ }
       }
       return companyResult(data, appointment, scraped);
     }));
     companies.push(...results);
-
-    // Rate limit safeguard between batches
-    if (i + 5 < appointments.length) {
-      await new Promise((r) => setTimeout(r, 150));
-    }
+    if (i + 5 < appointments.length) await new Promise((r) => setTimeout(r, 150));
   }
   return companies;
 }
@@ -344,26 +318,13 @@ function contactLeads(officer, companies, officerId) {
   const addresses = new Set();
 
   for (const company of companies) {
-    // UPDATED: Now includes company.website directly in the lead object
     if (company.email && !emails.has(company.email)) {
       emails.add(company.email);
-      emailLeads.push({ 
-        email: company.email, 
-        source: "Website Scraping", 
-        companyName: company.companyName, 
-        website: company.website, 
-        confidence: "high" 
-      });
+      emailLeads.push({ email: company.email, source: "Website Scraping", companyName: company.companyName, website: company.website, confidence: "high" });
     }
     if (company.phone && !phones.has(company.phone)) {
       phones.add(company.phone);
-      phoneLeads.push({ 
-        phone: company.phone, 
-        source: "Website Scraping", 
-        companyName: company.companyName, 
-        website: company.website, 
-        confidence: "high" 
-      });
+      phoneLeads.push({ phone: company.phone, source: "Website Scraping", companyName: company.companyName, website: company.website, confidence: "high" });
     }
     const key = `${company.registeredAddress.postalCode}|${company.registeredAddress.addressLine1}`;
     if (key !== "|" && !addresses.has(key)) {
@@ -374,10 +335,10 @@ function contactLeads(officer, companies, officerId) {
 
   const { firstName, lastName } = nameParts(officer.name);
   const searches = [];
-  
-  const salesNav = (keywords) => `https://www.linkedin.com/sales/search/people?keywords=${encodeURIComponent(keywords)}&geoIncluded=101165590`;
+  const salesNav = (keywords) =>
+    `https://www.linkedin.com/sales/search/people?keywords=${encodeURIComponent(keywords)}&geoIncluded=101165590`;
   const shortName = `${firstName} ${lastName}`.trim();
-  
+
   searches.push({
     searchUrl: salesNav(shortName),
     searchLabel: shortName,
@@ -385,15 +346,14 @@ function contactLeads(officer, companies, officerId) {
     confidence: "low",
     derivedFrom: "Director name",
   });
-  
+
   for (const company of companies.filter((item) => item.isActive).slice(0, 3)) {
     const pCode = company.registeredAddress?.postalCode || "";
     const searchKeywords = pCode ? `${shortName} ${pCode}` : `${shortName} ${company.companyName}`;
-    
     searches.push({
       searchUrl: salesNav(searchKeywords),
       searchLabel: `${shortName} (${pCode || company.companyName})`,
-      reasoning: `Searches director with postcode ${pCode || 'N/A'} for precise location matching.`,
+      reasoning: `Searches director with postcode ${pCode || "N/A"} for precise location matching.`,
       confidence: "high",
       derivedFrom: `Active company: ${company.companyName} | Postcode: ${pCode}`,
     });
@@ -413,27 +373,64 @@ function contactLeads(officer, companies, officerId) {
   };
 }
 
+// =============================================================================
+// Hunter.io — with domain-guessing fallback when no website was scraped
+// =============================================================================
+
+async function hunterCallDomain(domain, firstName, lastName) {
+  if (!domain || !firstName || !lastName) return null;
+  const params = new URLSearchParams({ first_name: firstName, last_name: lastName, domain, api_key: HUNTER_API_KEY });
+  try {
+    const response = await fetch(`${HUNTER_BASE}/email-finder?${params}`, { signal: AbortSignal.timeout(10000) });
+    if (!response.ok) return null;
+    const data = await response.json();
+    const score = data.data?.score || 0;
+    if (!data.data?.email || score < 50) return null;
+    return { email: data.data.email, score, confidence: score >= 80 ? "high" : "medium" };
+  } catch {
+    return null;
+  }
+}
+
 async function hunterEmail(directorName, website, companyName) {
-  if (!HUNTER_API_KEY || !website) return null;
-  let domain;
-  try { domain = new URL(website).hostname.replace(/^www\./, ""); } catch { return null; }
+  if (!HUNTER_API_KEY) return null;
+
   const { firstName, lastName } = nameParts(directorName);
   if (!firstName || !lastName) return null;
-  const params = new URLSearchParams({ first_name: firstName, last_name: lastName, domain, api_key: HUNTER_API_KEY });
-  const response = await fetch(`${HUNTER_BASE}/email-finder?${params}`, { signal: AbortSignal.timeout(10000) });
-  if (!response.ok) return null;
-  const data = await response.json();
-  const score = data.data?.score || 0;
-  if (!data.data?.email || score < 50) return null;
-  
-  // UPDATED: Now includes website directly in Hunter response payload
-  return {
-    email: data.data.email,
-    source: "Hunter.io Email Finder",
-    companyName,
-    website,
-    confidence: score >= 80 ? "high" : "medium",
-  };
+
+  // Path 1: website was found — extract domain and call Hunter directly
+  if (website) {
+    let domain;
+    try { domain = new URL(website).hostname.replace(/^www\./, ""); } catch { return null; }
+    const result = await hunterCallDomain(domain, firstName, lastName);
+    if (result) {
+      return {
+        email: result.email,
+        source: "Hunter.io Email Finder",
+        companyName,
+        website,
+        confidence: result.confidence,
+      };
+    }
+    return null;
+  }
+
+  // Path 2: no website found — guess domain candidates from company name
+  const domainCandidates = generateDomainCandidates(companyName);
+  for (const candidate of domainCandidates.slice(0, 8)) {
+    const result = await hunterCallDomain(candidate, firstName, lastName);
+    if (result) {
+      return {
+        email: result.email,
+        source: "Hunter.io Email Finder (domain guessed)",
+        companyName,
+        website: `https://www.${candidate}`,
+        confidence: result.confidence,
+      };
+    }
+  }
+
+  return null;
 }
 
 async function profile(officerId) {
@@ -522,10 +519,25 @@ app.get("/api/companies/:companyNumber", asyncRoute(async (req, res) => {
 app.post("/api/directors/:officerId/hunter-emails", asyncRoute(async (req, res) => {
   const officer = await getOfficer(req.params.officerId);
   if (!officer) return res.status(404).json({ error: "Director not found" });
+  
   const companies = Array.isArray(req.body?.companies) ? req.body.companies : [];
-  const emailLeads = (await Promise.all(companies.map((company) =>
-    hunterEmail(officer.name, company.website, company.companyName).catch(() => null)
-  ))).filter(Boolean);
+  const emailLeads = [];
+
+  // Process sequentially to respect Hunter.io API rate limits
+  for (const company of companies) {
+    try {
+      const result = await hunterEmail(officer.name, company.website, company.companyName);
+      if (result) {
+        emailLeads.push(result);
+      }
+      
+      // Tiny pause to keep Hunter.io happy (rate limits)
+      await new Promise(resolve => setTimeout(resolve, 300)); 
+    } catch (e) {
+      // ignore individual failures and continue to the next company
+    }
+  }
+
   res.json({ emailLeads });
 }));
 
