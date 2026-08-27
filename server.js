@@ -37,13 +37,25 @@ function generateDomainCandidates(companyName) {
   const stopWords = /\b(ltd|limited|plc|llp|group|uk|the|and|&|solutions|services|holdings|technologies|technology|global|international|consulting|consultancy|systems|digital|labs|ventures|studio|studios|media|creative|co)\b/gi;
   const cleaned = companyName.toLowerCase().replace(stopWords, "").replace(/[^a-z0-9]/g, "").trim();
   const hyphenated = companyName.toLowerCase().replace(stopWords, "").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").trim();
+  
   if (!cleaned) return [];
+  
   const candidates = [];
-  for (const host of [...new Set([cleaned, hyphenated].filter(Boolean))]) {
-    for (const tld of [".co.uk", ".com", ".io", ".org.uk"]) {
-      candidates.push(`${host}${tld}`);
+  const tlds = [".co.uk", ".com", ".io", ".org.uk", ".net"];
+
+  // FEATURE 2: DOMAIN ORDERING
+  // 1. Exact matches first, prioritizing .co.uk over .com
+  for (const tld of tlds) {
+    candidates.push(`${cleaned}${tld}`);
+  }
+
+  // 2. Hyphenated variants second
+  if (hyphenated !== cleaned) {
+    for (const tld of tlds) {
+      candidates.push(`${hyphenated}${tld}`);
     }
   }
+
   return [...new Set(candidates)];
 }
 
@@ -377,16 +389,46 @@ function contactLeads(officer, companies, officerId) {
 // Hunter.io — with domain-guessing fallback when no website was scraped
 // =============================================================================
 
+// FEATURE 3: CACHE HUNTER RESULTS
+const hunterCache = new Map();
+const CACHE_TTL = 24 * 60 * 60 * 1000; // Cache results for 24 hours (in milliseconds)
+
 async function hunterCallDomain(domain, firstName, lastName) {
   if (!domain || !firstName || !lastName) return null;
+
+  // Create a unique key for this search
+  const cacheKey = `${domain.toLowerCase()}|${firstName.toLowerCase()}|${lastName.toLowerCase()}`;
+  
+  // Check if we already ran this exact search in the last 24 hours
+  const cached = hunterCache.get(cacheKey);
+  if (cached && (Date.now() - cached.timestamp < CACHE_TTL)) {
+    return cached.data; // Return saved result (even if it's null, so we don't retry bad domains)
+  }
+
   const params = new URLSearchParams({ first_name: firstName, last_name: lastName, domain, api_key: HUNTER_API_KEY });
   try {
     const response = await fetch(`${HUNTER_BASE}/email-finder?${params}`, { signal: AbortSignal.timeout(10000) });
-    if (!response.ok) return null;
+    
+    // If Hunter errors out or can't find anything, cache the failure
+    if (!response.ok) {
+      hunterCache.set(cacheKey, { timestamp: Date.now(), data: null });
+      return null;
+    }
+    
     const data = await response.json();
     const score = data.data?.score || 0;
-    if (!data.data?.email || score < 50) return null;
-    return { email: data.data.email, score, confidence: score >= 80 ? "high" : "medium" };
+    
+    if (!data.data?.email || score < 50) {
+      hunterCache.set(cacheKey, { timestamp: Date.now(), data: null });
+      return null;
+    }
+    
+    const result = { email: data.data.email, score, confidence: score >= 80 ? "high" : "medium" };
+    
+    // Cache the successful hit!
+    hunterCache.set(cacheKey, { timestamp: Date.now(), data: result });
+    return result;
+
   } catch {
     return null;
   }
