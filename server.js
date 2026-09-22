@@ -1,9 +1,19 @@
+/*
+ * Director Finder - Credit Saving Version (Complete & Ready to Run)
+ *
+ * Setup:
+ *   npm install express cors
+ *   COMPANIES_HOUSE_API_KEY=your_key HUNTER_API_KEY=your_key node server.js
+ */
+
 const express = require("express");
 const cors = require("cors");
 const path = require("path");
 
 const app = express();
 const PORT = Number(process.env.PORT || 8080);
+
+// Ensure keys are safely extracted
 const COMPANIES_HOUSE_API_KEY = (process.env.COMPANIES_HOUSE_API_KEY || "").trim();
 const HUNTER_API_KEY = (process.env.HUNTER_API_KEY || "").trim();
 
@@ -118,7 +128,45 @@ async function hunterCallDomain(domain, firstName, lastName) {
 
 // --- ROUTES ---
 
-// 1. FREE PROFILE LOAD (Happens immediately when you search a director)
+// Health check endpoint
+app.get("/api/healthz", (_req, res) => res.json({ status: "ok" }));
+
+// Search for a director by name
+app.get("/api/directors/search", async (req, res) => {
+  try {
+    const query = String(req.query.q || "").trim();
+    if (!query) return res.status(400).json({ error: "Query parameter q is required" });
+    
+    const data = await companiesHouse(`/search/officers?q=${encodeURIComponent(query)}&items_per_page=50`);
+    const seen = new Map();
+    
+    for (const item of data?.items || []) {
+      const match = item.links?.self?.match(/\/officers\/([^/]+)/);
+      const name = item.title || item.name || "";
+      if (!match || !name) continue;
+      
+      const parts = nameParts(name);
+      const dob = item.date_of_birth ? `${item.date_of_birth.year}-${String(item.date_of_birth.month).padStart(2, '0')}` : "";
+      const key = `${parts.firstName.toLowerCase()}|${parts.lastName.toLowerCase()}|${dob}`;
+      
+      const current = seen.get(key);
+      const result = {
+        officerId: match[1],
+        name,
+        title: item.officer_role || null,
+        dateOfBirth: dob || null,
+        totalAppointments: item.appointment_count || 0
+      };
+      
+      if (!current || result.totalAppointments > current.totalAppointments) seen.set(key, result);
+    }
+    res.json([...seen.values()]);
+  } catch (error) {
+    res.status(500).json({ error: "Search failed" });
+  }
+});
+
+// 1. FREE PROFILE LOAD (Happens immediately when you select a director)
 app.get("/api/directors/:officerId/profile", async (req, res) => {
   try {
     const officer = await companiesHouse(`/officers/${req.params.officerId}/appointments`);
@@ -150,6 +198,10 @@ app.get("/api/directors/:officerId/profile", async (req, res) => {
   }
 });
 
+// Dummy endpoints to satisfy existing frontend calls if they expect these
+app.get("/api/directors/:officerId/companies", (req, res) => res.json([]));
+app.get("/api/directors/:officerId/contact-leads", (req, res) => res.json([]));
+
 // 2. THE BUTTON ROUTE (Only triggers when you click the Hunter button)
 app.post("/api/directors/:officerId/hunter-emails", async (req, res) => {
   try {
@@ -160,7 +212,7 @@ app.post("/api/directors/:officerId/hunter-emails", async (req, res) => {
     const emailLeads = [];
     let lookupsUsed = 0;
 
-    const { firstName, lastName } = nameParts(officer.name);
+    const { firstName, lastName } = nameParts(officer.name || "");
 
     for (const company of companies) {
       // ONLY check companies that don't already have an email found for free
@@ -192,6 +244,13 @@ app.post("/api/directors/:officerId/hunter-emails", async (req, res) => {
   }
 });
 
+// Catch-all route to serve the frontend
+app.get("*", (_req, res) => {
+  res.sendFile(path.join(__dirname, "public", "index.html"));
+});
+
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  console.log(`Companies House API Key: ${COMPANIES_HOUSE_API_KEY ? "Loaded" : "MISSING"}`);
+  console.log(`Hunter.io API Key: ${HUNTER_API_KEY ? "Loaded" : "MISSING"}`);
 });
